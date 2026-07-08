@@ -52,7 +52,16 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
     -- MATERIALIZED: zero-cost extraction from raw_payload JSONB at insert time
     subject              String    MATERIALIZED JSONExtractString(raw_payload, 'subject'),
     event_type           String    MATERIALIZED JSONExtractString(raw_payload, 'type'),
-    facility_id          String    MATERIALIZED JSONExtractString(raw_payload, 'facilityid'),
+    -- Envelope 'facilityid' is only populated for Encounter events; fall back to the
+    -- FHIR resource's source-facility extension so every resource type carries a facility.
+    facility_id          String    MATERIALIZED if(
+                                       JSONExtractString(raw_payload, 'facilityid') != '',
+                                       JSONExtractString(raw_payload, 'facilityid'),
+                                       JSONExtractString(
+                                           arrayFirst(
+                                               x -> JSONExtractString(x, 'url') LIKE '%source-facility%',
+                                               JSONExtractArrayRaw(raw_payload, 'data', 'extension')),
+                                           'valueString')),
     event_time           Nullable(DateTime64(3))
                                    MATERIALIZED toDateTime64OrNull(
                                        JSONExtractString(raw_payload, 'time'), 3),

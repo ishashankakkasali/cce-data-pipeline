@@ -580,16 +580,21 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_adoption_kpis_mv
 REFRESH EVERY 30 MINUTE APPEND
 TO mv_daily_adoption_kpis
 AS
+-- uniqIf(iel.subject, iel.subject != '') NOT uniq(iel.subject): this is a LEFT JOIN, so a
+-- facility with no accepted events today still yields one row whose iel.subject is the empty
+-- string (ClickHouse fills unmatched right-side columns with type defaults). Plain uniq('')
+-- counts that as 1 distinct patient, making a zero-activity facility report actual_patients=1.
+-- Filtering out '' makes an inactive facility correctly yield 0 while still emitting its row.
 SELECT
     toDate(now())                                                                          AS snapshot_date,
     now64(3)                                                                               AS refreshed_at,
     fr.facility_id,
     fr.expected_patients_per_day,
-    toUInt32(uniq(iel.subject))                                                            AS actual_patients,
+    toUInt32(uniqIf(iel.subject, iel.subject != ''))                                       AS actual_patients,
     coalesce(toFloat32(round(
-        toUInt32(uniq(iel.subject)) / nullIf(toFloat64(fr.expected_patients_per_day), 0) * 100, 1
+        toUInt32(uniqIf(iel.subject, iel.subject != '')) / nullIf(toFloat64(fr.expected_patients_per_day), 0) * 100, 1
     )), 0.0)                                                                               AS adoption_rate_pct,
-    toInt64(fr.expected_patients_per_day) - toInt64(toUInt32(uniq(iel.subject)))          AS reporting_gap
+    toInt64(fr.expected_patients_per_day) - toInt64(toUInt32(uniqIf(iel.subject, iel.subject != '')))  AS reporting_gap
 FROM (
     SELECT facility_id, expected_patients_per_day
     FROM cce_analytics.facility

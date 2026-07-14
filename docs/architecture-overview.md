@@ -159,7 +159,7 @@ All 14 CDC tables reside in the shared `ccedb` database (columns reconciled agai
 - **Kafka table engine** — consumes the Debezium topics directly; consumer MVs parse the envelope into base tables (no sink connector)
 - **ReplacingMergeTree(_version, _is_deleted)** — `clean_deleted_rows = 'Always'`: dedup by `_version` (`source.lsn`), physically removes deletes on merge
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
-- **Materialized Views** — 12 aggregation MVs on append-only sources; 6 refreshable daily-summary MVs (APPEND mode, `ReplacingMergeTree` backing, schema/07); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
+- **Materialized Views** — 12 aggregation MVs on append-only sources; 5 refreshable daily-summary MVs (schema/07, `ReplacingMergeTree` backing — compliance in APPEND mode; the `event_time`/occurrence-keyed event, deviation, adoption, and referral MVs full-recompute over a 12-month rolling window); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
 - **AggregatingMergeTree** — incremental aggregation with `-State`/`-Merge` (append-only sources) and `argMaxState` current-state rollups (mutable entities)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (4 dictionaries; the `QUERY...FINAL` sources avoid duplicate rows from unmerged parts — `dict_patient_facility` instead dedups via `argMax` GROUP BY)
@@ -224,15 +224,27 @@ flowchart TD
 
 ## 6. Data Domains
 
+### Metric time semantics
+
+> **Metric time semantics** — two clocks, chosen by metric type:
+>
+> - **Functional metrics** — clinical/business KPIs (adoption, compliance, deviations, event volume, referrals, patient cohorts). Measured on **clinical `event_time`**: when the clinical act actually happened, as carried on the inbound event. Date filters and daily rollups for these use `event_time`, so ingestion lag (offline sync, batch upload, retries, DLQ replay) never shifts the numbers.
+> - **Technical / operational metrics** — pipeline health and ingestion throughput. Measured on **processing / system time** (`received_at` / `now()`): when the platform physically received or processed the data.
+>
+> Rule of thumb: "when did it happen clinically?" → `event_time`; "when did our system handle it?" → `received_at` / `now()`.
+
+The daily-summary MVs in `schema/07` implement this: the `event_time`-derived MVs are keyed on `toDate(event_time)` with a 12-month rolling window (`now() - INTERVAL 12 MONTH`) and full-recompute refresh, and `scripts/validate-clickhouse.sh` enforces this contract.
+
 | Domain | Key Metrics | Source → MV |
 |--------|-------------|-------------|
-| **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly/daily` |
+| **Event Volume** | Events by resource type, facility, source, practitioner | `inbound_event_logs` → `mv_event_volume_hourly` (hourly buckets on `toStartOfHour(event_time)`); daily totals via `toDate(hour)` |
 | **Facility Ranking** | Event volume, unique patients, unique practitioners per facility | `inbound_event_logs` → `mv_facility_summary` |
 | **Practitioner Activity** | Events per practitioner, patient coverage, resource types | `inbound_event_logs` → `mv_practitioner_summary` |
 | **Compliance** | Adherence rate, enrollment status, step metrics, deviation breakdown per protocol/day | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) → `mv_daily_compliance_kpis` (schema/07) |
-| **Facility Activity** | Active/inactive facility counts, active facility rate — denominator from `facility` (CDC'd, schema/01) | `mv_daily_facility_kpis` → `mv_daily_facility_activity_summary` (schema/07) |
-| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `compliance_event_logs` + `facility` (CDC'd, schema/01) → `mv_daily_adoption_kpis` (schema/07) |
-| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07) |
+| **Facility Activity / Ranking** | Active/inactive facility counts, active facility rate, facility ranking | Computed **live** in the insights service — active-facility tiles read `mv_event_volume_hourly` (event_time-keyed); ranking from the enrolled-patient cohort + `inbound_event_logs`. (`mv_daily_facility_kpis` / `mv_daily_facility_activity_summary` were **removed** — no live reader.) |
+| **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `inbound_event_logs` (clinical footfall, `event_time`) + `facility` (CDC'd, schema/01) → `mv_daily_adoption_kpis` (schema/07) |
+| **Referrals** | Referral forms received by HIE (accepted referral-initiated events), total + per facility, per clinical day | `inbound_event_logs` ⋈ `compliance_event_logs` ⋈ `step_instances` (`event_time`-keyed) → `mv_daily_referral_kpis` (schema/07) |
+| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07, keyed on clinical occurrence day) |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
 | **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries FINAL` (base table, ReplacingMergeTree) |

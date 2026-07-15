@@ -5,7 +5,7 @@
 -- Compliance, facility, and deviation KPIs require either current mutable state
 -- (protocol_instances, step_instances) or cross-source aggregation — neither can be done
 -- with standard incremental MVs without double-counting CDC UPDATE rows. Refreshable MVs
--- (ClickHouse 24.3+) solve this by running a full SELECT every 30 minutes.
+-- (ClickHouse 24.3+) solve this by running a full SELECT every 30 seconds.
 --
 -- DOMAIN SPLIT — one MV per domain, reused across pages:
 --
@@ -34,7 +34,7 @@
 -- WHAT IS NOT COVERED (requires live queries to base tables):
 --   - getDeviations()            paginated row-level list, runtime filters
 --   - getDeviationsByAction()    step-keyed aggregation (no step-keyed MV exists yet)
---   - recentActivity windows     last24h/7d/30d rolling counts — incompatible with 30-min refresh
+--   - recentActivity windows     last24h/7d/30d rolling counts — incompatible with 30-second refresh
 --   - getAtRiskHotspots()        three-way patient segmentation (on_track/at_risk/non_compliant)
 --   - Patient timeline/detail    individual patient data — inherently row-level
 --   - rank ordinal               runtime window function over live results
@@ -45,7 +45,7 @@
 --
 -- APPEND MODE — how daily history works:
 --
---   Each 30-minute refresh APPENDs a new set of rows into the backing table.
+--   Each 30-second refresh APPENDs a new set of rows into the backing table.
 --   The backing tables use ReplacingMergeTree(refreshed_at) with ORDER BY starting
 --   on (snapshot_date, <dimension_key>). This means:
 --
@@ -61,14 +61,14 @@
 --     snapshot_date | protocol_definition_id | tracked_patients | refreshed_at
 --     2026-06-20    | proto-A                | 78               | 2026-06-20 23:30:00   ← last refresh day1
 --     2026-06-21    | proto-A                | 82               | 2026-06-21 23:30:00   ← last refresh day2
---     2026-06-22    | proto-A                | 89               | 2026-06-22 10:00:00   ← current, updates every 30min
+--     2026-06-22    | proto-A                | 89               | 2026-06-22 10:00:00   ← current, updates every 30s
 --
 --   Querying:
 --     Latest snapshot:    SELECT ... FROM mv_daily_compliance_kpis FINAL WHERE snapshot_date = today()
 --     Specific day:       SELECT ... FROM mv_daily_compliance_kpis FINAL WHERE snapshot_date = '2026-06-20'
 --     Trend across days:  SELECT snapshot_date, sum(tracked_patients) ... GROUP BY snapshot_date ORDER BY snapshot_date
 --
---   FINAL is required to see deduplicated rows (suppresses multiple 30-min inserts
+--   FINAL is required to see deduplicated rows (suppresses multiple 30-second inserts
 --   within the same day before ClickHouse background merge runs).
 --
 -- INITIAL REFRESH (run once immediately after applying this script):
@@ -100,7 +100,7 @@ USE cce_analytics;
 CREATE TABLE IF NOT EXISTS mv_daily_compliance_kpis
 (
     snapshot_date               Date,             -- calendar day this snapshot represents
-    refreshed_at                DateTime64(3),    -- version: latest 30-min refresh wins per day
+    refreshed_at                DateTime64(3),    -- version: latest 30-second refresh wins per day
 
     protocol_definition_id      UUID,
 
@@ -140,7 +140,7 @@ ORDER BY (snapshot_date, protocol_definition_id);
 -- the row with the latest refreshed_at survives — one authoritative row per day per protocol.
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_compliance_kpis_mv
-REFRESH EVERY 30 MINUTE APPEND
+REFRESH EVERY 30 SECOND APPEND
 TO mv_daily_compliance_kpis
 AS
 WITH
@@ -306,7 +306,7 @@ CREATE TABLE IF NOT EXISTS mv_daily_deviation_kpis
 ORDER BY (snapshot_date, protocol_definition_id, facility_id, action_id, deviation_type);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_deviation_kpis_mv
-REFRESH EVERY 30 MINUTE
+REFRESH EVERY 30 SECOND
 TO mv_daily_deviation_kpis
 AS
 SELECT
@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS mv_daily_event_kpis
 ORDER BY (snapshot_date, facility_id);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_event_kpis_mv
-REFRESH EVERY 30 MINUTE
+REFRESH EVERY 30 SECOND
 TO mv_daily_event_kpis
 AS
 SELECT
@@ -433,18 +433,18 @@ CREATE TABLE IF NOT EXISTS mv_daily_adoption_kpis
 ) ENGINE = ReplacingMergeTree(refreshed_at)
 ORDER BY (snapshot_date, facility_id);
 -- facility_name is intentionally NOT stored — resolved at query time from the facility table.
--- Storing it caused duplicate rows when the name changed between 30-min refreshes
+-- Storing it caused duplicate rows when the name changed between 30-second refreshes
 -- (GROUP BY facility_id, facility_name produced two groups for the same facility_id).
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_adoption_kpis_mv
-REFRESH EVERY 30 MINUTE
+REFRESH EVERY 30 SECOND
 TO mv_daily_adoption_kpis
 AS
 -- e-Buzima Adoption = clinical footfall: unique patients who WALKED IN (had a clinical event) at a
 -- facility on each clinical day, keyed on event_time (when the visit happened), NOT received_at
 -- (when we ingested it). So a backdated/batch upload credits the day the patient was actually seen.
 --
--- Event-driven + full-recompute: the MV is REFRESH EVERY 30 MINUTE *without* APPEND, so each cycle
+-- Event-driven + full-recompute: the MV is REFRESH EVERY 30 SECOND *without* APPEND, so each cycle
 -- atomically REPLACES the whole target table — every clinical day is recomputed (a late upload
 -- updates its own past day). uniq(subject) dedupes patients, so it is robust to CDC row duplication
 -- (no FINAL needed on inbound_event_logs). Rows are emitted only for (facility, day) that had a
@@ -504,7 +504,7 @@ CREATE TABLE IF NOT EXISTS mv_daily_referral_kpis
 ORDER BY (snapshot_date, facility_id);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_referral_kpis_mv
-REFRESH EVERY 30 MINUTE
+REFRESH EVERY 30 SECOND
 TO mv_daily_referral_kpis
 AS
 SELECT

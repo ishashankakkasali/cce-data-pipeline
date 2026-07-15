@@ -146,13 +146,13 @@ Notes:
 
 The `inbound_event_logs` table stores raw CloudEvents JSON in `raw_payload`. MATERIALIZED columns extract key fields **at insert time** — zero query cost, no separate processing.
 
+`event_time` is **not** one of these — it is a stored CDC column (see 3.3) populated directly from the collector service's `inbound_event_log.event_time` (Postgres), which the `ClinicalEventTimeExtractor` derives from the FHIR resource's own clinical date field. It represents when the clinical event actually happened, as opposed to `received_at` (when the collector ingested it).
+
 ```sql
 -- Extracted automatically when rows are inserted
 subject          String MATERIALIZED JSONExtractString(raw_payload, 'subject'),
 event_type       String MATERIALIZED JSONExtractString(raw_payload, 'type'),
 facility_id      String MATERIALIZED JSONExtractString(raw_payload, 'facilityid'),
-event_time       Nullable(DateTime64(3)) MATERIALIZED
-    toDateTime64OrNull(JSONExtractString(raw_payload, 'time'), 3),
 resource_type    String MATERIALIZED
     JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'resourceType'),
 patient_id       String ALIAS subject,
@@ -178,12 +178,12 @@ practitioner_display String MATERIALIZED
 | `error_details` | String | Error detail (rejection drill-down) |
 | `received_at` | DateTime64(6) | Ingestion timestamp |
 | `updated_at` | DateTime64(6) | Last modification timestamp |
+| `event_time` | Nullable(DateTime64(6)) | Clinical occurrence time, extracted from the FHIR resource by `ClinicalEventTimeExtractor` (collector service); null only if the collector's own fallback chain (FHIR date → envelope time → received_at) failed |
 | `_version` | UInt64 | CDC version for ReplacingMergeTree deduplication |
 | `_is_deleted` | UInt8 | Soft-delete flag (1 = deleted in PostgreSQL) |
 | `subject` | String (MATERIALIZED) | Patient identifier |
 | `event_type` | String (MATERIALIZED) | CloudEvents type |
 | `facility_id` | String (MATERIALIZED) | Facility identifier |
-| `event_time` | Nullable(DateTime64(3)) (MATERIALIZED) | Event timestamp |
 | `resource_type` | String (MATERIALIZED) | FHIR resource type |
 | `patient_id` | String (ALIAS) | Alias for subject |
 | `practitioner_ref` | String (MATERIALIZED) | Practitioner reference |
@@ -270,7 +270,7 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 
 | MV | Source | Target Engine | Key Metrics |
 |----|--------|---------------|-------------|
-| `mv_event_volume_hourly` | `inbound_event_logs` | SummingMergeTree | `event_count` per hour/facility/source/type; daily totals derived via `toDate(hour)` at query time |
+| `mv_event_volume_hourly` | `inbound_event_logs` | SummingMergeTree | `event_count` per hour/facility/source/type — hour = `toStartOfHour(event_time)` (clinical time, not `received_at`); daily totals derived via `toDate(hour)` at query time |
 | `mv_facility_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per facility/day |
 | `mv_practitioner_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per practitioner/day |
 | `mv_deviation_trends` | `deviations` | SummingMergeTree | `deviation_count` per type/day |

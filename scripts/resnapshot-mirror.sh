@@ -53,11 +53,18 @@ else
 fi
 
 # 3. Truncate ClickHouse tables (base + MV backing + rollups) so the re-snapshot doesn't double-count.
+#    The cce_analytics tables are owned by cce_pipeline, so every query below must authenticate —
+#    an unauthenticated request 401s, and with `curl -f` that silently yields an empty table list
+#    (no truncate), leaving stale rows for the snapshot to double-load.
 echo "Step 3: truncate ClickHouse tables..."
-chq() { curl -sf "${CH_URL}/" --data-binary "$1" >/dev/null 2>&1; }
+chq() { curl -sf --user "${CH_USER}:${CH_PASS}" "${CH_URL}/" --data-binary "$1" >/dev/null 2>&1; }
 if curl -sf "${CH_URL}/ping" >/dev/null 2>&1; then
-    TABLES=$(curl -sf "${CH_URL}/?query=SELECT+name+FROM+system.tables+WHERE+database='cce_analytics'+AND+(engine='ReplacingMergeTree'+OR+engine='SummingMergeTree'+OR+engine='AggregatingMergeTree')" 2>/dev/null || true)
-    for t in $TABLES; do chq "TRUNCATE TABLE cce_analytics.${t}" && echo "    ✓ ${t}"; done
+    TABLES=$(curl -sf --user "${CH_USER}:${CH_PASS}" "${CH_URL}/?query=SELECT+name+FROM+system.tables+WHERE+database='cce_analytics'+AND+(engine='ReplacingMergeTree'+OR+engine='SummingMergeTree'+OR+engine='AggregatingMergeTree')" 2>/dev/null || true)
+    if [[ -z "$TABLES" ]]; then
+        echo "  ✗ no tables returned — check CH_USER/CH_PASS (cce_analytics requires auth). Aborting to avoid a double-loaded snapshot." >&2
+        exit 1
+    fi
+    for t in $TABLES; do chq "TRUNCATE TABLE cce_analytics.\`${t}\`" && echo "    ✓ ${t}"; done
 else
     echo "  ✗ ClickHouse unreachable — truncate manually before resuming"
 fi

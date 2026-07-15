@@ -188,7 +188,7 @@ $CH < schema/04-create-indexes.sql
 $CH < schema/05-create-dictionary.sql
 $CH < schema/06-current-state-rollups.sql  # argMaxState current-state rollups (recommended)
 $CH < schema/08-reference-tables.sql          # documentation-only: facility is now CDC'd (table in schema/01, consumer MV in schema/02) — no SQL executed
-$CH < schema/07-daily-summary-aggregates.sql  # refreshable daily compliance/facility/dashboard snapshots (CH 24.3+)
+$CH < schema/07-daily-summary-aggregates.sql  # 5 refreshable daily-summary MVs: compliance, event, deviation, adoption, referral (CH 24.3+)
 # NOTE: schema/09-historical-backfill.sql is intentionally NOT applied here. It is a manual,
 #       parameterised (--param_from_date/--param_to_date) reconstruction of past daily-MV rows,
 #       run ONLY after a full re-snapshot. See deploy-scripts docs/state-history-deployment.md (Step 6).
@@ -207,16 +207,16 @@ $CH < schema/07-daily-summary-aggregates.sql  # refreshable daily compliance/fac
 > `ReplacingMergeTree(refreshed_at)` with `(snapshot_date, <key>)` as ORDER BY — within the same
 > calendar day, multiple 30-min rows deduplicate to the latest via background merge (or FINAL at
 > query time); across days all snapshots are preserved permanently, enabling date-range queries.
-> `mv_daily_facility_activity_summary_mv` runs `DEPENDS ON mv_daily_facility_kpis_mv` to ensure it
-> always reads fresh facility data.
+> The event, deviation, adoption, and referral MVs instead full-recompute a 12-month rolling window
+> each cycle (keyed on clinical `event_time` / occurrence day), so backdated events land on the day
+> they clinically occurred.
 > Trigger an initial fill immediately after applying:
 > ```sql
 > SYSTEM REFRESH VIEW mv_daily_compliance_kpis_mv;
-> SYSTEM REFRESH VIEW mv_daily_facility_kpis_mv;
 > SYSTEM REFRESH VIEW mv_daily_deviation_kpis_mv;
 > SYSTEM REFRESH VIEW mv_daily_event_kpis_mv;
 > SYSTEM REFRESH VIEW mv_daily_adoption_kpis_mv;
-> SYSTEM REFRESH VIEW mv_daily_facility_activity_summary_mv;  -- last: depends on facility_kpis
+> SYSTEM REFRESH VIEW mv_daily_referral_kpis_mv;
 > ```
 
 Then register the Debezium connector (§5) to start the snapshot.
@@ -243,7 +243,7 @@ Then register the Debezium connector (§5) to start the snapshot.
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
 | Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 14` |
-| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 35` (12 aggregation + 14 consumer + 3 rollup + 6 daily-summary) |
+| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 34` (12 aggregation + 14 consumer + 3 rollup + 5 daily-summary) |
 | Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `14` |
 | Data flowing | `clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"` | `> 0` after snapshot |
 | Debezium connector | `./scripts/check-connector-health.sh` | `HEALTHY` |

@@ -218,7 +218,7 @@ check_mv_def() {
 check_mv_def "mv_daily_event_kpis_mv"     "now() - toIntervalMonth(12)" "toDate(iel.event_time)"
 check_mv_def "mv_daily_adoption_kpis_mv"  "now() - toIntervalMonth(12)" "toDate(iel.event_time)"
 check_mv_def "mv_daily_deviation_kpis_mv" "now() - toIntervalMonth(12)" "occurred_at"
-check_mv_def "mv_daily_referral_kpis_mv"  "now() - toIntervalMonth(12)" "toDate(iel.event_time)"
+check_mv_def "mv_daily_referral_kpis_mv"  "now() - toIntervalMonth(12)" "toDate(iel.event_time)" "TRANSFER_ENCOUNTER"
 
 echo ""
 if [[ $MISSING -eq 0 ]]; then

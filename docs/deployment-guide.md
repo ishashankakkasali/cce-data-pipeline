@@ -202,10 +202,10 @@ $CH < schema/07-daily-summary-aggregates.sql  # 5 refreshable daily-summary MVs:
 
 > **Why APPEND-mode refreshable MVs (schema/07)?**
 > Compliance status counts require current mutable state (not append-only inserts) — incremental
-> MVs on mutable tables double-count CDC UPDATE events. `REFRESH EVERY 30 MINUTE APPEND` inserts a
-> new snapshot row every 30 minutes without deleting prior snapshots. The backing tables use
+> MVs on mutable tables double-count CDC UPDATE events. `REFRESH EVERY 30 SECOND APPEND` inserts a
+> new snapshot row every 30 seconds without deleting prior snapshots. The backing tables use
 > `ReplacingMergeTree(refreshed_at)` with `(snapshot_date, <key>)` as ORDER BY — within the same
-> calendar day, multiple 30-min rows deduplicate to the latest via background merge (or FINAL at
+> calendar day, multiple refresh rows deduplicate to the latest via background merge (or FINAL at
 > query time); across days all snapshots are preserved permanently, enabling date-range queries.
 > The event, deviation, adoption, and referral MVs instead full-recompute a 12-month rolling window
 > each cycle (keyed on clinical `event_time` / occurrence day), so backdated events land on the day

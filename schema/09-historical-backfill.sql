@@ -241,8 +241,9 @@ LEFT JOIN step_agg    sa ON ea.snapshot_date = sa.snapshot_date AND ea.protocol_
 -- 7. mv_daily_referral_kpis — NO historical backfill needed.
 -- ============================================================
 -- Refreshable FULL-RECOMPUTE MV (schema/07) keyed on the CLINICAL event_time day of accepted
--- referral-initiated events (step_instances ⋈ compliance_event_logs ⋈ inbound_event_logs). A
--- re-snapshot restores event_time + the join keys and the MV rebuilds every past day itself:
+-- referral events ("received by HIE": prod TRANSFER_ENCOUNTER Encounters + dev/demo referral-step
+-- match fallback, deduped). A re-snapshot restores event_time + raw_payload + the join keys and the
+-- MV rebuilds every past day itself:
 --   SYSTEM REFRESH VIEW mv_daily_referral_kpis_mv;
 
 

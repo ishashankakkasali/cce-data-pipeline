@@ -28,8 +28,10 @@
 --   mv_daily_event_kpis                → Events page header cards
 --                                        (total / matched / zero-match / duplicate / pipeline loss)
 --
---   mv_daily_referral_kpis             → Dashboard Referrals card (total + per-facility)
---                                        accepted referral-initiated events per event_time day × facility
+--   mv_daily_referral_kpis             → Dashboard "Referrals received by HIE" card (total + per-facility)
+--                                        accepted referral inbound events per event_time day × facility:
+--                                        prod TRANSFER_ENCOUNTER (ingestion) + dev/demo referral-step
+--                                        match fallback, deduped — see section 7
 --
 -- WHAT IS NOT COVERED (requires live queries to base tables):
 --   - getDeviations()            paginated row-level list, runtime filters
@@ -476,30 +478,43 @@ GROUP BY snapshot_date, fr.facility_id, fr.expected_patients_per_day;
 -- ============================================================
 -- 7. Referral KPIs  (per CLINICAL event_time day × facility)
 -- ============================================================
--- Covers: Dashboard "Referrals" card — total referrals received by HIE + per-facility breakdown.
--- Definition: a "referral form successfully received by HIE" is an ACCEPTED inbound event that was
--- matched to (completed) a Referral Initiated step. Keyed on the inbound event's CLINICAL event_time
--- day (same clock + window as the other event_time MVs), so the Dashboard date filter reconciles.
+-- Covers: Dashboard "Referrals received by HIE" card — total + per-facility breakdown.
+-- Definition (RI-35): a "referral received by HIE" is an ACCEPTED inbound event, counted once per
+-- accepted inbound row, keyed on its CLINICAL event_time day (same clock + window as the other
+-- event_time MVs), that satisfies EITHER environment's referral shape:
 --
--- Join path (the completing event is a COMPLIANCE event log, NOT the collector's inbound row):
---   step_instances.completed_by_event_id → compliance_event_logs.id
---   compliance_event_logs.cloudevents_id → inbound_event_logs.cloudevents_id
--- referral_count = accepted referral-initiated events on that day at that facility.
+--   (A) PROD "Facility service journey" — an Encounter whose FHIR Encounter.type carries the
+--       transfer marker display 'TRANSFER_ENCOUNTER' (the same Encounter that fires the protocol's
+--       Referral step trigger). Ingestion-based: counted the moment it is accepted, INDEPENDENT of
+--       whether the compliance engine has matched it to a Referral step — so the card no longer
+--       under-reports (transfers for not-yet-enrolled patients) or lags behind step matching / CDC.
 --
--- action_id pattern (baked in so it works in every environment without config):
---   ^(.+-referral|referral)$  — matches Dev/Demo "anc-visit-1-referral" (…-referral suffix) AND
---   UAT/Prod "referral" (bare). Excludes "-referral-consultation" / "-referral-ack" /
---   "-referral-closure" (they don't end at "-referral" and aren't the bare word).
+--   (B) DEV/DEMO (ANC protocol) — the referral there is a ServiceRequest with NO code/category/
+--       marker in its payload; the ONLY reliable referral signal is that it COMPLETED a Referral
+--       step. So for environments without TRANSFER_ENCOUNTER we fall back to the compliance-match:
+--       accepted events whose cloudevents_id completed a step with action_id ^(.+-referral|referral)$.
+--
+-- WHY BOTH (not just A): A is clean and lag-free for prod but invisible in demo (demo has no
+-- TRANSFER_ENCOUNTER); B keeps dev/demo dashboards populated. The two branches are an OR over the
+-- SAME accepted inbound row, so there is NO double counting — in prod a matched transfer satisfies
+-- both branches but is one row (counted once); B adds nothing in prod (prod referrals ARE transfer
+-- encounters) and A adds nothing in demo.
+--
+-- The arrayExists in branch A is position-robust (any type/coding entry, not just the first).
 --
 -- Full-recompute (REFRESH without APPEND) + 12-month rolling window: same model as sections 4-6, so
 -- a backdated referral lands on the day it clinically occurred and refresh cost stays bounded.
 
+-- referral_count = RECEIVED by HIE (branch A ∪ B). matched_count = "compliant" referrals: those that
+-- completed a Referral step (branch B — matched to a tracked care journey). The UI derives
+-- non-compliant = referral_count - matched_count and compliance_rate = matched_count / referral_count.
 CREATE TABLE IF NOT EXISTS mv_daily_referral_kpis
 (
     snapshot_date    Date,          -- clinical event_time day
     refreshed_at     DateTime64(3),
     facility_id      String,
-    referral_count   UInt64         -- accepted referral-initiated events that day
+    referral_count   UInt64,        -- accepted referral events that day (received by HIE)
+    matched_count    UInt64         -- of those, ones matched to a Referral step ("compliant")
 ) ENGINE = ReplacingMergeTree(refreshed_at)
 ORDER BY (snapshot_date, facility_id);
 
@@ -511,13 +526,31 @@ SELECT
     toDate(iel.event_time)   AS snapshot_date,
     now64(3)                 AS refreshed_at,
     iel.facility_id          AS facility_id,
-    count()                  AS referral_count
+    count()                  AS referral_count,
+    -- "compliant": the accepted referral event was matched to (completed) a Referral step
+    countIf(iel.cloudevents_id IN (
+               SELECT cel.cloudevents_id
+               FROM cce_analytics.compliance_event_logs AS cel FINAL
+               JOIN cce_analytics.step_instances AS si FINAL ON si.completed_by_event_id = cel.id
+               WHERE match(si.action_id, '^(.+-referral|referral)$'))) AS matched_count
 FROM cce_analytics.inbound_event_logs AS iel FINAL
-JOIN cce_analytics.compliance_event_logs AS cel FINAL ON cel.cloudevents_id = iel.cloudevents_id
-JOIN cce_analytics.step_instances       AS si  FINAL ON si.completed_by_event_id = cel.id
 WHERE iel.status = 'ACCEPTED' AND iel.event_time IS NOT NULL
   AND iel.event_time >= (now() - INTERVAL 12 MONTH)   -- rolling window, caps refresh cost
-  AND match(si.action_id, '^(.+-referral|referral)$')
+  AND (
+        -- (A) PROD: TRANSFER_ENCOUNTER Encounter (ingestion-based, match-independent)
+        (iel.resource_type = 'Encounter'
+         AND arrayExists(
+               t -> arrayExists(
+                       c -> JSONExtractString(c, 'display') = 'TRANSFER_ENCOUNTER',
+                       JSONExtractArrayRaw(t, 'coding')),
+               JSONExtractArrayRaw(JSONExtractRaw(iel.raw_payload, 'data'), 'type')))
+        -- (B) DEV/DEMO fallback: accepted event that completed a Referral step
+        OR iel.cloudevents_id IN (
+               SELECT cel.cloudevents_id
+               FROM cce_analytics.compliance_event_logs AS cel FINAL
+               JOIN cce_analytics.step_instances AS si FINAL ON si.completed_by_event_id = cel.id
+               WHERE match(si.action_id, '^(.+-referral|referral)$'))
+      )
 GROUP BY snapshot_date, iel.facility_id;
 
 

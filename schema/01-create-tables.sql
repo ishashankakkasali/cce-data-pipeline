@@ -58,16 +58,27 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
     -- MATERIALIZED: zero-cost extraction from raw_payload JSONB at insert time
     subject              String    MATERIALIZED JSONExtractString(raw_payload, 'subject'),
     event_type           String    MATERIALIZED JSONExtractString(raw_payload, 'type'),
-    -- Envelope 'facilityid' is only populated for Encounter events; fall back to the
-    -- FHIR resource's source-facility extension so every resource type carries a facility.
+    -- Facility attribution mirrors the emitter's FacilityIdExtractor fix (openhim-cce-emitter-adaptor
+    -- 7456fba, "Multiple locations bug fix"): prefer the FHIR resource's source-facility extension —
+    -- the source system's unambiguous *reporting* facility — over the envelope 'facilityid'.
+    -- For a TRANSFER_ENCOUNTER the envelope 'facilityid' (derived from Encounter.location[0]) is the
+    -- transfer DESTINATION, so trusting it mis-attributed transfer-out events to the receiving facility.
+    -- source-facility is present on every resource type (identical to location[0] for plain encounters),
+    -- so it is the correct primary; the envelope 'facilityid' remains a fallback when it is absent.
+    -- NB: the old emitter already wrote the correct source-facility extension, so recomputing this
+    -- column corrects historically-stored payloads regardless of the emitter redeploy.
     facility_id          String    MATERIALIZED if(
-                                       JSONExtractString(raw_payload, 'facilityid') != '',
-                                       JSONExtractString(raw_payload, 'facilityid'),
                                        JSONExtractString(
                                            arrayFirst(
                                                x -> JSONExtractString(x, 'url') LIKE '%source-facility%',
                                                JSONExtractArrayRaw(raw_payload, 'data', 'extension')),
-                                           'valueString')),
+                                           'valueString') != '',
+                                       JSONExtractString(
+                                           arrayFirst(
+                                               x -> JSONExtractString(x, 'url') LIKE '%source-facility%',
+                                               JSONExtractArrayRaw(raw_payload, 'data', 'extension')),
+                                           'valueString'),
+                                       JSONExtractString(raw_payload, 'facilityid')),
     resource_type        String    MATERIALIZED JSONExtractString(
                                        JSONExtractRaw(raw_payload, 'data'), 'resourceType'),
     practitioner_ref     String    MATERIALIZED JSONExtractString(

@@ -58,27 +58,32 @@ CREATE TABLE IF NOT EXISTS inbound_event_logs
     -- MATERIALIZED: zero-cost extraction from raw_payload JSONB at insert time
     subject              String    MATERIALIZED JSONExtractString(raw_payload, 'subject'),
     event_type           String    MATERIALIZED JSONExtractString(raw_payload, 'type'),
-    -- Facility attribution mirrors the emitter's FacilityIdExtractor fix (openhim-cce-emitter-adaptor
-    -- 7456fba, "Multiple locations bug fix"): prefer the FHIR resource's source-facility extension —
-    -- the source system's unambiguous *reporting* facility — over the envelope 'facilityid'.
-    -- For a TRANSFER_ENCOUNTER the envelope 'facilityid' (derived from Encounter.location[0]) is the
-    -- transfer DESTINATION, so trusting it mis-attributed transfer-out events to the receiving facility.
-    -- source-facility is present on every resource type (identical to location[0] for plain encounters),
-    -- so it is the correct primary; the envelope 'facilityid' remains a fallback when it is absent.
-    -- NB: the old emitter already wrote the correct source-facility extension, so recomputing this
-    -- column corrects historically-stored payloads regardless of the emitter redeploy.
-    facility_id          String    MATERIALIZED if(
-                                       JSONExtractString(
-                                           arrayFirst(
-                                               x -> JSONExtractString(x, 'url') LIKE '%source-facility%',
-                                               JSONExtractArrayRaw(raw_payload, 'data', 'extension')),
-                                           'valueString') != '',
-                                       JSONExtractString(
-                                           arrayFirst(
-                                               x -> JSONExtractString(x, 'url') LIKE '%source-facility%',
-                                               JSONExtractArrayRaw(raw_payload, 'data', 'extension')),
-                                           'valueString'),
-                                       JSONExtractString(raw_payload, 'facilityid')),
+    -- Facility attribution prioritizes Encounter.hospitalization.origin — per FHIR R4
+    -- (https://hl7.org/fhir/R4/encounter.html), hospitalization is only ever populated on a
+    -- TRANSFER_ENCOUNTER, and origin is the true reporting facility — falling back to the location
+    -- field (Encounter.location[0].location for transfer/visit/consultation encounters, or the
+    -- direct location Reference on Procedure/Immunization), then the envelope 'facilityid'.
+    -- location[0] alone is NOT reliable for a TRANSFER_ENCOUNTER: it holds the transfer
+    -- DESTINATION, not the reporting facility, so trusting it mis-attributes transfer-out events
+    -- to the receiving facility. The source-facility extension is deliberately never consulted —
+    -- it does not reliably distinguish origin from destination and is superseded by reading
+    -- hospitalization.origin directly. Mirrors compliance-service's FacilityService and
+    -- openhim-cce-emitter-adaptor's FacilityIdExtractor. Recomputing this column (rather than
+    -- trusting the envelope) corrects historically-stored payloads regardless of emitter redeploy.
+    facility_id          String    MATERIALIZED
+                                       if(JSONExtractString(raw_payload, 'data', 'hospitalization', 'origin', 'reference') != '',
+                                          arrayElement(splitByChar('/', JSONExtractString(raw_payload, 'data', 'hospitalization', 'origin', 'reference')), -1),
+                                       if(JSONExtractString(raw_payload, 'data', 'hospitalization', 'origin', 'identifier', 'value') != '',
+                                          JSONExtractString(raw_payload, 'data', 'hospitalization', 'origin', 'identifier', 'value'),
+                                       if(JSONExtractString(raw_payload, 'data', 'location', 1, 'location', 'reference') != '',
+                                          arrayElement(splitByChar('/', JSONExtractString(raw_payload, 'data', 'location', 1, 'location', 'reference')), -1),
+                                       if(JSONExtractString(raw_payload, 'data', 'location', 1, 'location', 'identifier', 'value') != '',
+                                          JSONExtractString(raw_payload, 'data', 'location', 1, 'location', 'identifier', 'value'),
+                                       if(JSONExtractString(raw_payload, 'data', 'location', 'reference') != '',
+                                          arrayElement(splitByChar('/', JSONExtractString(raw_payload, 'data', 'location', 'reference')), -1),
+                                       if(JSONExtractString(raw_payload, 'data', 'location', 'identifier', 'value') != '',
+                                          JSONExtractString(raw_payload, 'data', 'location', 'identifier', 'value'),
+                                          JSONExtractString(raw_payload, 'facilityid'))))))),
     resource_type        String    MATERIALIZED JSONExtractString(
                                        JSONExtractRaw(raw_payload, 'data'), 'resourceType'),
     practitioner_ref     String    MATERIALIZED JSONExtractString(

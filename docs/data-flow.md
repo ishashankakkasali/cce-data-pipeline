@@ -152,7 +152,6 @@ The `inbound_event_logs` table stores raw CloudEvents JSON in `raw_payload`. MAT
 -- Extracted automatically when rows are inserted
 subject          String MATERIALIZED JSONExtractString(raw_payload, 'subject'),
 event_type       String MATERIALIZED JSONExtractString(raw_payload, 'type'),
-facility_id      String MATERIALIZED JSONExtractString(raw_payload, 'facilityid'),
 resource_type    String MATERIALIZED
     JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'resourceType'),
 patient_id       String ALIAS subject,
@@ -161,6 +160,16 @@ practitioner_ref String MATERIALIZED
 practitioner_display String MATERIALIZED
     JSONExtractString(JSONExtractRaw(raw_payload, 'data'), 'practitionerDisplay')
 ```
+
+`facility_id` is also MATERIALIZED but is not a single `JSONExtractString` call — it re-derives the
+facility from the raw FHIR resource directly rather than trusting the envelope, mirroring
+compliance-service's `FacilityService` and openhim-cce-emitter-adaptor's `FacilityIdExtractor`:
+`Encounter.hospitalization.origin` (the true reporting facility on a `TRANSFER_ENCOUNTER` — per FHIR
+R4, `hospitalization` is only ever populated there) → `location[0].location` (the fallback for
+non-transfer encounters, which never carry `hospitalization`) → the direct `location` Reference for
+`Procedure`/`Immunization` → the envelope `facilityid` as a last resort. The `source-facility`
+extension is deliberately never consulted. See the `facility_id` column in
+`schema/01-create-tables.sql` for the full expression.
 
 ### 3.3 Table DDL Summary
 
